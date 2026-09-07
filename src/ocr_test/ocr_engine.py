@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from threading import Lock
 import time
 from dataclasses import asdict, dataclass
@@ -20,20 +21,41 @@ class OCRLine:
 
 
 @dataclass(frozen=True)
+class OCRField:
+    label: str
+    value: str
+    confidence: float
+    line_numbers: list[int]
+    bbox: list[float]
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class OCRDocument:
     source_name: str
     width: int
     height: int
     elapsed_ms: int
     lines: list[OCRLine]
+    fields: list[OCRField]
 
     @property
     def text(self) -> str:
         return "\n".join(line.text for line in self.lines)
 
+    @property
+    def structured_text(self) -> str:
+        return "\n".join(
+            f"{field.label}: {field.value}" if field.value else field.label
+            for field in self.fields
+        )
+
     def as_dict(self) -> dict[str, Any]:
         result = asdict(self)
         result["text"] = self.text
+        result["structured_text"] = self.structured_text
         return result
 
 
@@ -65,6 +87,7 @@ class PaddleOCREngine:
         with self._lock:
             raw_results = self._get_pipeline().predict(str(image_path))
             lines = parse_ocr_result(raw_results)
+        fields = build_field_mappings(lines)
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         return OCRDocument(
             source_name=image_path.name,
@@ -72,6 +95,7 @@ class PaddleOCREngine:
             height=height,
             elapsed_ms=elapsed_ms,
             lines=lines,
+            fields=fields,
         )
 
 
@@ -152,6 +176,105 @@ def parse_ocr_result(results: Any) -> list[OCRLine]:
         min((point[0] for point in line.polygon), default=0),
     ))
     return lines
+
+
+def _line_bbox(line: OCRLine) -> tuple[float, float, float, float]:
+    xs = [point[0] for point in line.polygon]
+    ys = [point[1] for point in line.polygon]
+    return (
+        min(xs, default=0),
+        min(ys, default=0),
+        max(xs, default=0),
+        max(ys, default=0),
+    )
+
+
+def _same_visual_column(first: tuple[float, float, float, float], second: tuple[float, float, float, float]) -> bool:
+    first_left, _, first_right, _ = first
+    second_left, _, second_right, _ = second
+    overlap = max(0.0, min(first_right, second_right) - max(first_left, second_left))
+    shortest_width = max(1.0, min(first_right - first_left, second_right - second_left))
+    left_distance = abs(first_left - second_left)
+    return overlap / shortest_width >= 0.25 or left_distance <= max(14.0, shortest_width * 0.35)
+
+
+def _connected_vertically(first: tuple[float, float, float, float], second: tuple[float, float, float, float]) -> bool:
+    _, first_top, _, first_bottom = first
+    _, second_top, _, second_bottom = second
+    if second_top < first_top:
+        first, second = second, first
+        _, first_top, _, first_bottom = first
+        _, second_top, _, second_bottom = second
+    first_height = max(1.0, first_bottom - first_top)
+    second_height = max(1.0, second_bottom - second_top)
+    gap = second_top - first_bottom
+    return gap <= max(28.0, min(first_height, second_height) * 2.2)
+
+
+def _looks_like_field_label(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.endswith(":") or ("(" in stripped and ")" in stripped):
+        return True
+    words = re.findall(r"[A-Za-z]+", stripped)
+    letters = re.findall(r"[A-Za-z]", stripped)
+    uppercase_ratio = sum(letter.isupper() for letter in letters) / max(1, len(letters))
+    generic_markers = {
+        "ADDRESS", "AMOUNT", "CARRIER", "DATE", "DESCRIPTION", "DESTINATION",
+        "MEASUREMENT", "NAME", "NUMBER", "NO", "PACKAGES", "PORT", "PRICE",
+        "QUANTITY", "REFERENCE", "TOTAL", "UNIT", "VALUE", "WEIGHT",
+    }
+    return len(stripped) <= 90 and (
+        uppercase_ratio >= 0.8
+        or any(word.upper().rstrip(".") in generic_markers for word in words)
+    )
+
+
+def build_field_mappings(lines: list[OCRLine]) -> list[OCRField]:
+    """Group OCR lines by visual layout without document-specific templates."""
+    if not lines:
+        return []
+
+    boxes = [_line_bbox(line) for line in lines]
+    blocks: list[list[int]] = []
+    for index, box in enumerate(boxes):
+        candidates: list[tuple[float, int]] = []
+        for block_index, block in enumerate(blocks):
+            previous_index = block[-1]
+            previous_box = boxes[previous_index]
+            if _same_visual_column(previous_box, box) and _connected_vertically(previous_box, box):
+                candidates.append((box[1] - previous_box[3], block_index))
+        if candidates:
+            _, chosen_block = min(candidates)
+            blocks[chosen_block].append(index)
+        else:
+            blocks.append([index])
+
+    fields: list[OCRField] = []
+    for block in blocks:
+        block_lines = [lines[index] for index in block]
+        label = block_lines[0].text
+        value_lines = block_lines[1:]
+        if not _looks_like_field_label(label) and len(value_lines) == 0:
+            value = ""
+        else:
+            value = " ".join(line.text for line in value_lines)
+        confidence = sum(line.confidence for line in block_lines) / len(block_lines)
+        block_boxes = [boxes[index] for index in block]
+        fields.append(OCRField(
+            label=label,
+            value=value,
+            confidence=round(confidence, 4),
+            line_numbers=[index + 1 for index in block],
+            bbox=[
+                min(box[0] for box in block_boxes),
+                min(box[1] for box in block_boxes),
+                max(box[2] for box in block_boxes),
+                max(box[3] for box in block_boxes),
+            ],
+        ))
+    return fields
 
 
 engine = PaddleOCREngine()
