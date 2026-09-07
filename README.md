@@ -22,7 +22,7 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-처음 PaddleOCR를 실행하면 공식 OCR 모델이 로컬 캐시에 다운로드됩니다. CPU 환경은 기본값이고, NVIDIA GPU 환경에서는 `.env` 또는 환경 변수로 `PADDLEOCR_DEVICE=gpu:0`을 지정할 수 있습니다.
+처음 PaddleOCR를 실행하면 공식 OCR 모델이 로컬 캐시에 다운로드됩니다. NVIDIA GPU(`gpu:0`)를 기본으로 사용하며, 다른 장치를 쓰려면 `.env` 또는 환경 변수로 `PADDLEOCR_DEVICE`를 지정할 수 있습니다.
 
 ## 실행
 
@@ -45,4 +45,3 @@ uvicorn ocr_test.app:app --host 127.0.0.1 --port 8000
 - `src/ocr_test/app.py`: 샘플 목록, 이미지 제공, 업로드·OCR API
 - `src/ocr_test/web/`: 로컬 결과 대시보드
 - `data/`: 로컬 데이터셋이며 Git에는 포함하지 않음
-
