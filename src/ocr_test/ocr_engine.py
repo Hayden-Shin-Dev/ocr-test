@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import statistics
 import re
 from threading import Lock
 import time
@@ -18,18 +19,41 @@ class OCRLine:
     text: str
     confidence: float
     polygon: list[list[float]]
+    page_no: int = 0
+
+    @property
+    def bbox(self) -> dict[str, float]:
+        x0, y0, x1, y1 = _line_bbox(self)
+        return {"x0": x0, "y0": y0, "x1": x1, "y1": y1}
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "text": self.text,
+            "confidence": self.confidence,
+            "bbox": self.bbox,
+            "polygon": self.polygon,
+            "page_no": self.page_no,
+        }
 
 
 @dataclass(frozen=True)
 class OCRField:
     label: str
-    value: str
+    value: str | list[str]
     confidence: float
-    line_numbers: list[int]
-    bbox: list[float]
+    raw_lines: list[dict[str, Any]]
+    bbox: dict[str, float]
+    mapping_method: str
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class OCRMapping:
+    fields: list[OCRField]
+    layout_mode: str
+    low_confidence_count: int
 
 
 @dataclass(frozen=True)
@@ -40,6 +64,8 @@ class OCRDocument:
     elapsed_ms: int
     lines: list[OCRLine]
     fields: list[OCRField]
+    layout_mode: str
+    low_confidence_count: int
 
     @property
     def text(self) -> str:
@@ -47,8 +73,13 @@ class OCRDocument:
 
     @property
     def structured_text(self) -> str:
+        def format_value(value: str | list[str]) -> str:
+            if isinstance(value, list):
+                return " | ".join(item for item in value if item)
+            return value
+
         return "\n".join(
-            f"{field.label}: {field.value}" if field.value else field.label
+            f"{field.label}: {format_value(field.value)}" if field.value else field.label
             for field in self.fields
         )
 
@@ -56,6 +87,7 @@ class OCRDocument:
         result = asdict(self)
         result["text"] = self.text
         result["structured_text"] = self.structured_text
+        result["raw_text_lines"] = [line.as_dict() for line in self.lines]
         return result
 
 
@@ -87,7 +119,7 @@ class PaddleOCREngine:
         with self._lock:
             raw_results = self._get_pipeline().predict(str(image_path))
             lines = parse_ocr_result(raw_results)
-        fields = build_field_mappings(lines)
+        mapping = map_ocr_lines(lines, image_path=image_path)
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         return OCRDocument(
             source_name=image_path.name,
@@ -95,7 +127,9 @@ class PaddleOCREngine:
             height=height,
             elapsed_ms=elapsed_ms,
             lines=lines,
-            fields=fields,
+            fields=mapping.fields,
+            layout_mode=mapping.layout_mode,
+            low_confidence_count=mapping.low_confidence_count,
         )
 
 
@@ -189,104 +223,356 @@ def _line_bbox(line: OCRLine) -> tuple[float, float, float, float]:
     )
 
 
-def _same_visual_column(first: tuple[float, float, float, float], second: tuple[float, float, float, float]) -> bool:
-    first_left, _, first_right, _ = first
-    second_left, _, second_right, _ = second
-    overlap = max(0.0, min(first_right, second_right) - max(first_left, second_left))
-    shortest_width = max(1.0, min(first_right - first_left, second_right - second_left))
-    left_distance = abs(first_left - second_left)
-    return overlap / shortest_width >= 0.6 or left_distance <= max(18.0, shortest_width * 0.25)
+GAP_X_MULTIPLIER = 2.5
+GAP_Y_MULTIPLIER = 1.8
+KNOWN_LABEL_TERMS = {
+    "ADDRESS", "AMOUNT", "BILL", "BOOKING", "CARRIER", "CONSIGNEE", "DATE",
+    "DESCRIPTION", "DESTINATION", "DELIVERY", "EXPORT", "FORWARDING", "FREIGHT",
+    "INSTRUCTIONS", "INVOICE", "LIABILITY", "LOADING", "MEASUREMENT", "NAME",
+    "NUMBER", "NO", "NOTIFY", "ORIGIN", "PACKAGES", "PARTICULARS", "PORT",
+    "PRICE", "QUANTITY", "REFERENCE", "SHIPMENT", "SHIPPER", "TOTAL", "UNIT",
+    "VALUE", "WEIGHT", "INSURANCE", "DECLARED", "CHARGES", "RATES", "ROUTING",
+    "MARKS", "PAYABLE", "RECEIPT", "MOVEMENT", "COUNTRY",
+}
 
 
-def _connected_vertically(first: tuple[float, float, float, float], second: tuple[float, float, float, float]) -> bool:
-    _, first_top, _, first_bottom = first
-    _, second_top, _, second_bottom = second
-    if second_top < first_top:
-        first, second = second, first
-        _, first_top, _, first_bottom = first
-        _, second_top, _, second_bottom = second
-    first_height = max(1.0, first_bottom - first_top)
-    second_height = max(1.0, second_bottom - second_top)
-    first_center = (first_top + first_bottom) / 2
-    second_center = (second_top + second_bottom) / 2
-    if abs(first_center - second_center) <= min(first_height, second_height) * 0.55:
+def _median_or(values: list[float], fallback: float) -> float:
+    return statistics.median(values) if values else fallback
+
+
+def _vertical_overlap(first: tuple[float, float, float, float], second: tuple[float, float, float, float]) -> float:
+    overlap = max(0.0, min(first[3], second[3]) - max(first[1], second[1]))
+    return overlap / max(1.0, min(first[3] - first[1], second[3] - second[1]))
+
+
+def _horizontal_overlap(first: tuple[float, float, float, float], second: tuple[float, float, float, float]) -> float:
+    overlap = max(0.0, min(first[2], second[2]) - max(first[0], second[0]))
+    return overlap / max(1.0, min(first[2] - first[0], second[2] - second[0]))
+
+
+def _rough_rows(lines: list[OCRLine], average_height: float) -> list[list[int]]:
+    rows: list[list[int]] = []
+    for index in sorted(range(len(lines)), key=lambda item: (_line_bbox(lines[item])[1], _line_bbox(lines[item])[0])):
+        box = _line_bbox(lines[index])
+        center_y = (box[1] + box[3]) / 2
+        matching = []
+        for row_index, row in enumerate(rows):
+            row_boxes = [_line_bbox(lines[item]) for item in row]
+            row_center = statistics.mean((item[1] + item[3]) / 2 for item in row_boxes)
+            if abs(center_y - row_center) <= average_height * 0.65:
+                matching.append(row_index)
+        if matching:
+            rows[matching[0]].append(index)
+        else:
+            rows.append([index])
+    for row in rows:
+        row.sort(key=lambda item: _line_bbox(lines[item])[0])
+    return rows
+
+
+def _local_gaps(lines: list[OCRLine]) -> tuple[float, float, float]:
+    boxes = [_line_bbox(line) for line in lines]
+    heights = [max(1.0, box[3] - box[1]) for box in boxes]
+    average_height = statistics.median(heights) if heights else 1.0
+    rows = _rough_rows(lines, average_height)
+    horizontal_gaps: list[float] = []
+    for row in rows:
+        for first_index, second_index in zip(row, row[1:]):
+            gap = boxes[second_index][0] - boxes[first_index][2]
+            if gap > 0:
+                horizontal_gaps.append(gap)
+
+    vertical_gaps: list[float] = []
+    ordered = sorted(range(len(lines)), key=lambda item: _line_bbox(lines[item])[1])
+    for current_position, current_index in enumerate(ordered):
+        current = boxes[current_index]
+        prior_candidates = []
+        for previous_index in ordered[:current_position]:
+            previous = boxes[previous_index]
+            if _horizontal_overlap(previous, current) >= 0.2:
+                gap = current[1] - previous[3]
+                if gap >= 0:
+                    prior_candidates.append(gap)
+        if prior_candidates:
+            vertical_gaps.append(min(prior_candidates))
+
+    vertical_baseline = _median_or(vertical_gaps, average_height)
+    if 0 < len(vertical_gaps) <= 3:
+        # With only a few vertical relationships, the median can be pulled
+        # toward a section break. The closest local relationship is the safer
+        # baseline for hierarchical grouping.
+        vertical_baseline = min(vertical_gaps)
+    return (_median_or(horizontal_gaps, average_height), vertical_baseline, average_height)
+
+
+def _horizontal_cell_rows(
+    lines: list[OCRLine],
+    rows: list[list[int]],
+    gap_x: float,
+    average_height: float,
+) -> list[list[int]]:
+    boxes = [_line_bbox(line) for line in lines]
+    cell_rows: list[list[list[int]]] = []
+    # A page containing only one fragment per column has no small within-cell
+    # gaps to establish a useful median. Keep the median rule, with a local
+    # text-height cap for that sparse case; this remains resolution-independent.
+    threshold = min(gap_x * GAP_X_MULTIPLIER, average_height * 2.0)
+    for row in rows:
+        cell = [row[0]]
+        row_cells: list[list[int]] = []
+        for previous_index, current_index in zip(row, row[1:]):
+            gap = boxes[current_index][0] - boxes[previous_index][2]
+            if gap >= threshold:
+                row_cells.append(cell)
+                cell = [current_index]
+            else:
+                cell.append(current_index)
+        row_cells.append(cell)
+        cell_rows.append(row_cells)
+    return cell_rows
+
+
+def _horizontal_cells(
+    lines: list[OCRLine],
+    rows: list[list[int]],
+    gap_x: float,
+    average_height: float,
+) -> list[list[int]]:
+    return [cell for row in _horizontal_cell_rows(lines, rows, gap_x, average_height) for cell in row]
+
+
+def _cell_bbox(cell: list[int], boxes: list[tuple[float, float, float, float]]) -> tuple[float, float, float, float]:
+    return (
+        min(boxes[index][0] for index in cell),
+        min(boxes[index][1] for index in cell),
+        max(boxes[index][2] for index in cell),
+        max(boxes[index][3] for index in cell),
+    )
+
+
+def _vertical_blocks(cells: list[list[int]], lines: list[OCRLine], gap_y: float, average_height: float) -> tuple[list[list[int]], list[bool]]:
+    boxes = [_line_bbox(line) for line in lines]
+    cell_boxes = [_cell_bbox(cell, boxes) for cell in cells]
+    order = sorted(range(len(cells)), key=lambda index: (cell_boxes[index][1], cell_boxes[index][0]))
+    blocks: list[list[int]] = []
+    ambiguous: list[bool] = []
+    # The median multiplier is the primary threshold. For sparse pages, cap
+    # it by the local text height so a single large section gap cannot absorb
+    # the next block merely because there are few close vertical gaps.
+    threshold = min(gap_y * GAP_Y_MULTIPLIER, average_height * 0.5)
+    for cell_index in order:
+        current = cell_boxes[cell_index]
+        candidates: list[tuple[float, int, float]] = []
+        for block_index, block in enumerate(blocks):
+            previous_index = block[-1]
+            previous = cell_boxes[previous_index]
+            same_row = abs((current[1] + current[3]) / 2 - (previous[1] + previous[3]) / 2) <= average_height * 0.8
+            if same_row:
+                continue
+            left_distance = abs(previous[0] - current[0])
+            # A wide title or paragraph can overlap several columns. The
+            # stable left edge is the useful local column signal in that case.
+            if left_distance > average_height * 2.5:
+                continue
+            gap = max(0.0, current[1] - previous[3])
+            previous_text = " ".join(lines[index].text for index in cells[block[0]])
+            current_text = " ".join(lines[index].text for index in cells[cell_index])
+            label_value_continuation = (
+                _is_known_label(previous_text)
+                and not _is_known_label(current_text)
+                and gap <= threshold + average_height * 0.6
+            )
+            if gap <= threshold or label_value_continuation:
+                candidates.append((gap, block_index, gap))
+        if candidates:
+            _, block_index, gap = min(candidates)
+            blocks[block_index].append(cell_index)
+            ambiguous[block_index] = ambiguous[block_index] or abs(gap - threshold) / max(1.0, threshold) <= 0.15
+        else:
+            blocks.append([cell_index])
+            ambiguous.append(False)
+    return blocks, ambiguous
+
+
+def _is_known_label(text: str) -> bool:
+    words = re.findall(r"[A-Za-z]+", text.upper())
+    return any(word in KNOWN_LABEL_TERMS for word in words) or text.rstrip().endswith(":") or ("(" in text and ")" in text)
+
+
+def _is_wrapped_label(previous: str, current: str, average_length: float) -> bool:
+    """Recognize a continuation of a label without naming a document template."""
+    previous_words = previous.upper().split()
+    current_words = current.upper().split()
+    if not previous_words or not current_words:
         return False
-    gap = second_top - first_bottom
-    return gap <= max(28.0, min(first_height, second_height) * 2.2)
-
-
-def _looks_like_field_label(text: str) -> bool:
-    stripped = text.strip()
-    if not stripped:
-        return False
-    if stripped.endswith(":") or ("(" in stripped and ")" in stripped):
-        return True
-    words = re.findall(r"[A-Za-z]+", stripped)
-    generic_markers = {
-        "ADDRESS", "AMOUNT", "BILL", "BOOKING", "CARRIER", "CONSIGNEE", "DATE",
-        "DESCRIPTION", "DESTINATION", "DELIVERY", "FORWARDING", "FREIGHT",
-        "INSTRUCTIONS", "INVOICE", "LIABILITY", "LOADING", "MOVEMENT",
-        "MEASUREMENT", "NAME", "NUMBER", "NO", "PACKAGES", "PORT", "PRICE",
-        "PARTICULARS", "QUANTITY", "REFERENCE", "REFERENCES", "ROUTING", "SHIPMENT",
-        "SHIPPER", "TOTAL", "UNIT", "VALUE", "WEIGHT", "COUNTRY", "CARRIAGE",
-        "INSURANCE", "DECLARED", "CHARGES", "RATES",
+    current_is_short = len(current) <= max(average_length * 1.5, 12.0)
+    current_is_label_word = all(
+        word.strip(".,:/()") in KNOWN_LABEL_TERMS for word in current_words
+    )
+    unfinished = previous_words[-1].strip(".,:/()") in {
+        "OF", "BY", "FOR", "FROM", "IN", "PARTY", "AND", "OR",
     }
-    return len(stripped) <= 90 and any(word.upper().rstrip(".") in generic_markers for word in words)
+    return current_is_short and (current_is_label_word or unfinished)
 
 
-def _split_inline_label(text: str) -> tuple[str, str]:
-    if ":" not in text:
-        return text, ""
-    label, value = text.split(":", 1)
-    if label.strip() and value.strip():
-        return label.strip(), value.strip()
-    return text.rstrip(":"), ""
+def _split_inline_label(text: str) -> tuple[str, list[str]]:
+    if ":" in text:
+        label, value = text.split(":", 1)
+        if label.strip() and value.strip():
+            return label.strip(), [value.strip()]
+        return text.rstrip(":"), []
+    return text, []
+
+
+def _field_from_block(
+    block: list[int],
+    cells: list[list[int]],
+    lines: list[OCRLine],
+    boxes: list[tuple[float, float, float, float]],
+    method: str,
+    ambiguous: bool,
+    header: list[str] | None = None,
+) -> OCRField:
+    block_lines = [line_index for cell_index in block for line_index in cells[cell_index]]
+    block_lines.sort(key=lambda index: (_line_bbox(lines[index])[1], _line_bbox(lines[index])[0]))
+    raw = [lines[index].as_dict() for index in block_lines]
+    first_text = " ".join(lines[index].text for index in cells[block[0]])
+    label, inline_values = _split_inline_label(first_text)
+    label_cell_count = 1
+    average_length = statistics.mean(len(lines[index].text) for index in block_lines)
+    while label_cell_count < len(block) - (1 if inline_values else 0):
+        candidate = " ".join(lines[index].text for index in cells[block[label_cell_count]])
+        if not _is_wrapped_label(label, candidate, average_length):
+            break
+        label = f"{label} {candidate}"
+        label_cell_count += 1
+    value_items = inline_values + [
+        " ".join(lines[index].text for index in cells[cell_index])
+        for cell_index in block[label_cell_count:]
+    ]
+    if header is not None:
+        label = " | ".join(header)
+        value_items = [
+            " | ".join(" ".join(lines[index].text for index in cells[cell_index]) for cell_index in block)
+        ]
+    block_boxes = [boxes[index] for index in block_lines]
+    base = 0.9 if method == "table" else 0.6
+    confidence = base
+    if len(block_lines) > 5:
+        confidence -= 0.1
+    if ambiguous:
+        confidence -= 0.15
+    if _is_known_label(label):
+        confidence += 0.1
+    return OCRField(
+        label=label.rstrip(":"),
+        value=value_items,
+        confidence=round(max(0.0, min(1.0, confidence)), 4),
+        raw_lines=raw,
+        bbox={
+            "x0": min(box[0] for box in block_boxes),
+            "y0": min(box[1] for box in block_boxes),
+            "x1": max(box[2] for box in block_boxes),
+            "y1": max(box[3] for box in block_boxes),
+        },
+        mapping_method=method,
+    )
+
+
+def _repeat_signature(block: list[int], cells: list[list[int]], lines: list[OCRLine]) -> tuple[tuple[float, float], ...]:
+    boxes = [_line_bbox(line) for line in lines]
+    return tuple((round(_cell_bbox(cells[index], boxes)[0], -1), 0.0) for index in block)
+
+
+def _similar_signature(first: tuple[tuple[float, float], ...], second: tuple[tuple[float, float], ...], tolerance: float) -> bool:
+    if len(first) != len(second):
+        return False
+    return all(abs(left_a - left_b) <= tolerance and abs(right_a - right_b) <= tolerance for (left_a, right_a), (left_b, right_b) in zip(first, second))
+
+
+def _map_page(lines: list[OCRLine]) -> tuple[list[OCRField], str]:
+    if not lines:
+        return [], "coordinate_fallback"
+    gap_x, gap_y, average_height = _local_gaps(lines)
+    rows = _rough_rows(lines, average_height)
+    cell_rows = _horizontal_cell_rows(lines, rows, gap_x, average_height)
+    cells = [cell for row in cell_rows for cell in row]
+    cell_row_indexes: list[list[int]] = []
+    offset = 0
+    for row in cell_rows:
+        cell_row_indexes.append(list(range(offset, offset + len(row))))
+        offset += len(row)
+    blocks, ambiguous = _vertical_blocks(cells, lines, gap_y, average_height)
+    signatures = [_repeat_signature(block, cells, lines) for block in blocks]
+    repeated = []
+    for index, signature in enumerate(signatures):
+        similar_count = sum(_similar_signature(signature, other, average_height) for other in signatures)
+        if similar_count >= 3:
+            repeated.append(index)
+    repeated_rows = []
+    line_boxes = [_line_bbox(line) for line in lines]
+    row_signatures = [
+        tuple((round(_cell_bbox(cells[cell_index], line_boxes)[0], -1), 0.0) for cell_index in row)
+        for row in cell_row_indexes
+    ]
+    for index, signature in enumerate(row_signatures):
+        similar_count = sum(_similar_signature(signature, other, average_height) for other in row_signatures)
+        if similar_count >= 3:
+            repeated_rows.append(index)
+    repeated_run = bool(repeated_rows) and repeated_rows == list(range(repeated_rows[0], repeated_rows[-1] + 1))
+    row_table = (
+        len(repeated_rows) >= 3
+        and repeated_run
+        and len(repeated_rows) / max(1, len(cell_rows)) >= 0.5
+        and any(len(cell_rows[index]) >= 2 for index in repeated_rows)
+    )
+    # A block signature is only promoted when the row-level clustering also
+    # confirms a repeated row. This prevents wide headings and prose columns
+    # from masquerading as a table on otherwise free-form pages.
+    block_table = len(repeated) >= 3 and row_table and any(len(signature) >= 2 for signature in signatures)
+    is_table = block_table or row_table
+    fields: list[OCRField] = []
+    if row_table:
+        header_row = repeated_rows[0]
+        header = [" ".join(lines[index].text for index in cell) for cell in cell_rows[header_row]]
+        for row_index in range(len(cell_rows)):
+            if row_index == header_row:
+                continue
+            row_cells = cell_row_indexes[row_index]
+            row_ambiguous = False
+            fields.append(_field_from_block(row_cells, cells, lines, [_line_bbox(line) for line in lines], "table", row_ambiguous, header=header))
+    elif is_table:
+        header = [" ".join(lines[index].text for index in cells[cell_index]) for cell_index in blocks[repeated[0]]]
+        for block_index, block in enumerate(blocks):
+            if block_index == repeated[0]:
+                continue
+            fields.append(_field_from_block(block, cells, lines, [_line_bbox(line) for line in lines], "table", ambiguous[block_index], header=header))
+    else:
+        for block_index, block in enumerate(blocks):
+            fields.append(_field_from_block(block, cells, lines, [_line_bbox(line) for line in lines], "coordinate", ambiguous[block_index]))
+    fields.sort(key=lambda field: (field.bbox["y0"], field.bbox["x0"]))
+    return fields, "line_based" if is_table else "coordinate_fallback"
+
+
+def map_ocr_lines(lines: list[OCRLine], image_path: Path | None = None) -> OCRMapping:
+    del image_path
+    fields: list[OCRField] = []
+    modes: set[str] = set()
+    for page_no in sorted({line.page_no for line in lines}):
+        page_fields, mode = _map_page([line for line in lines if line.page_no == page_no])
+        fields.extend(page_fields)
+        modes.add(mode)
+    if not fields:
+        layout_mode = "coordinate_fallback"
+    elif len(modes) > 1:
+        layout_mode = "mixed"
+    else:
+        layout_mode = modes.pop()
+    return OCRMapping(fields, layout_mode, sum(field.confidence < 0.6 for field in fields))
 
 
 def build_field_mappings(lines: list[OCRLine]) -> list[OCRField]:
-    """Group OCR lines by visual layout without document-specific templates."""
-    if not lines:
-        return []
-
-    boxes = [_line_bbox(line) for line in lines]
-    blocks: list[list[int]] = []
-    for index, box in enumerate(boxes):
-        candidates: list[tuple[float, int]] = []
-        for block_index, block in enumerate(blocks):
-            previous_index = block[-1]
-            previous_box = boxes[previous_index]
-            starts_new_field = _looks_like_field_label(lines[index].text)
-            if not starts_new_field and _same_visual_column(previous_box, box) and _connected_vertically(previous_box, box):
-                candidates.append((box[1] - previous_box[3], block_index))
-        if candidates:
-            _, chosen_block = min(candidates)
-            blocks[chosen_block].append(index)
-        else:
-            blocks.append([index])
-
-    fields: list[OCRField] = []
-    for block in blocks:
-        block_lines = [lines[index] for index in block]
-        label, inline_value = _split_inline_label(block_lines[0].text)
-        value_lines = block_lines[1:]
-        value_parts = [inline_value] if inline_value else []
-        value_parts.extend(line.text for line in value_lines)
-        value = " ".join(value_parts)
-        confidence = sum(line.confidence for line in block_lines) / len(block_lines)
-        block_boxes = [boxes[index] for index in block]
-        fields.append(OCRField(
-            label=label,
-            value=value,
-            confidence=round(confidence, 4),
-            line_numbers=[index + 1 for index in block],
-            bbox=[
-                min(box[0] for box in block_boxes),
-                min(box[1] for box in block_boxes),
-                max(box[2] for box in block_boxes),
-                max(box[3] for box in block_boxes),
-            ],
-        ))
-    return fields
+    return map_ocr_lines(lines).fields
 
 
 engine = PaddleOCREngine()
