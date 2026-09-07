@@ -85,20 +85,22 @@ def _result_payload(result: Any) -> Mapping[str, Any]:
 def _bbox(value: Any) -> dict[str, float] | None:
     points = _python(value)
     if isinstance(points, Mapping):
-        keys = ("x0", "y0", "x1", "y1")
-        if all(key in points for key in keys):
-            return {key: float(points[key]) for key in keys}
+        if all(key in points for key in ("x0", "y0", "x1", "y1")):
+            return {key: float(points[key]) for key in ("x0", "y0", "x1", "y1")}
         points = points.get("coordinate") or points.get("bbox")
     if not isinstance(points, Sequence) or isinstance(points, (str, bytes)):
         return None
     if len(points) == 4 and all(isinstance(item, (int, float)) for item in points):
         return {"x0": float(points[0]), "y0": float(points[1]), "x1": float(points[2]), "y1": float(points[3])}
     flattened = [point for point in points if isinstance(point, Sequence) and len(point) >= 2]
-    if len(flattened) >= 2:
-        xs = [float(point[0]) for point in flattened]
-        ys = [float(point[1]) for point in flattened]
-        return {"x0": min(xs), "y0": min(ys), "x1": max(xs), "y1": max(ys)}
-    return None
+    if len(flattened) < 2:
+        return None
+    return {
+        "x0": min(float(point[0]) for point in flattened),
+        "y0": min(float(point[1]) for point in flattened),
+        "x1": max(float(point[0]) for point in flattened),
+        "y1": max(float(point[1]) for point in flattened),
+    }
 
 
 def _union(boxes: list[dict[str, float]]) -> dict[str, float]:
@@ -108,64 +110,6 @@ def _union(boxes: list[dict[str, float]]) -> dict[str, float]:
         "x1": max(box["x1"] for box in boxes),
         "y1": max(box["y1"] for box in boxes),
     }
-
-
-def _text_from_table_ocr(table_ocr: Mapping[str, Any]) -> list[tuple[str, dict[str, float]]]:
-    texts = _python(table_ocr.get("rec_texts", []))
-    boxes = _python(table_ocr.get("rec_boxes", []))
-    if not isinstance(texts, Sequence) or not isinstance(boxes, Sequence):
-        return []
-    result: list[tuple[str, dict[str, float]]] = []
-    for text, box in zip(texts, boxes):
-        parsed = _bbox(box)
-        if parsed and str(text).strip():
-            result.append((str(text).strip(), parsed))
-    return result
-
-
-def _axis_clusters(values: list[float], tolerance: float) -> list[float]:
-    centers: list[float] = []
-    for value in sorted(values):
-        if not centers or abs(value - centers[-1]) > tolerance:
-            centers.append(value)
-        else:
-            centers[-1] = (centers[-1] + value) / 2
-    return centers
-
-
-def _table_from_payload(payload: Mapping[str, Any], page_no: int, layout_blocks: list[StructureBlock]) -> list[StructureTable]:
-    tables: list[StructureTable] = []
-    raw_tables = _python(payload.get("table_res_list", []))
-    if not isinstance(raw_tables, Sequence):
-        return tables
-    for raw in raw_tables:
-        if not isinstance(raw, Mapping):
-            continue
-        raw_boxes = raw.get("cell_box_list", [])
-        boxes = [_bbox(item) for item in _python(raw_boxes)] if isinstance(raw_boxes, Sequence) else []
-        boxes = [item for item in boxes if item]
-        if not boxes:
-            continue
-        heights = [max(1.0, box["y1"] - box["y0"]) for box in boxes]
-        tolerance = statistics.median(heights) * 0.55
-        row_centers = _axis_clusters([(box["y0"] + box["y1"]) / 2 for box in boxes], tolerance)
-        col_centers = _axis_clusters([box["x0"] for box in boxes], tolerance)
-        ocr_items = _text_from_table_ocr(raw.get("table_ocr_pred", {}))
-        cells: list[StructureCell] = []
-        for box in boxes:
-            center_y = (box["y0"] + box["y1"]) / 2
-            row_index = min(range(len(row_centers)), key=lambda index: abs(row_centers[index] - center_y))
-            column_index = min(range(len(col_centers)), key=lambda index: abs(col_centers[index] - box["x0"]))
-            text = " ".join(text for text, text_box in ocr_items if _intersection_ratio(text_box, box) >= 0.15)
-            cells.append(StructureCell(box, row_index, column_index, text, page_no))
-        table_bbox = _union(boxes)
-        table_score = 0.0
-        for block in layout_blocks:
-            if block.label.lower() == "table" and _intersection_ratio(block.bbox, table_bbox) >= 0.1:
-                table_score = max(table_score, block.score)
-        html = str(raw.get("pred_html", ""))
-        tables.append(StructureTable(table_bbox, cells, html, table_score, page_no))
-    return tables
 
 
 def _intersection_ratio(first: dict[str, float], second: dict[str, float]) -> float:
@@ -181,6 +125,43 @@ def _intersection_ratio(first: dict[str, float], second: dict[str, float]) -> fl
     return area / denominator
 
 
+def _axis_clusters(values: list[float], tolerance: float) -> list[float]:
+    centers: list[float] = []
+    for value in sorted(values):
+        if not centers or abs(value - centers[-1]) > tolerance:
+            centers.append(value)
+        else:
+            centers[-1] = (centers[-1] + value) / 2
+    return centers
+
+
+def _table_from_payload(payload: Mapping[str, Any], page_no: int, layout_blocks: list[StructureBlock]) -> list[StructureTable]:
+    raw_tables = _python(payload.get("table_res_list", []))
+    if not isinstance(raw_tables, Sequence):
+        return []
+    tables: list[StructureTable] = []
+    for raw in raw_tables:
+        if not isinstance(raw, Mapping):
+            continue
+        raw_boxes = _python(raw.get("cell_box_list", []))
+        boxes = [_bbox(item) for item in raw_boxes] if isinstance(raw_boxes, Sequence) else []
+        boxes = [box for box in boxes if box]
+        if not boxes:
+            continue
+        tolerance = statistics.median(max(1.0, box["y1"] - box["y0"]) for box in boxes) * 0.55
+        row_centers = _axis_clusters([(box["y0"] + box["y1"]) / 2 for box in boxes], tolerance)
+        col_centers = _axis_clusters([box["x0"] for box in boxes], tolerance)
+        cells: list[StructureCell] = []
+        for box in boxes:
+            center_y = (box["y0"] + box["y1"]) / 2
+            row_index = min(range(len(row_centers)), key=lambda index: abs(row_centers[index] - center_y))
+            column_index = min(range(len(col_centers)), key=lambda index: abs(col_centers[index] - box["x0"]))
+            cells.append(StructureCell(box, row_index, column_index, page_no=page_no))
+        score = max((block.score for block in layout_blocks if block.label.casefold() == "table" and _intersection_ratio(block.bbox, _union(boxes)) >= 0.1), default=0.0)
+        tables.append(StructureTable(_union(boxes), cells, str(raw.get("pred_html", "")), score, page_no))
+    return tables
+
+
 def parse_structure_result(results: Any, width: int, height: int) -> StructureDocument:
     items = results if isinstance(results, Sequence) and not isinstance(results, (str, bytes, Mapping)) else [results]
     blocks: list[StructureBlock] = []
@@ -193,22 +174,16 @@ def parse_structure_result(results: Any, width: int, height: int) -> StructureDo
         for raw in _python(raw_boxes):
             if not isinstance(raw, Mapping):
                 continue
-            parsed = _bbox(raw.get("coordinate"))
-            if not parsed:
-                continue
-            page_blocks.append(StructureBlock(
-                label=str(raw.get("label", "unknown")),
-                score=float(raw.get("score", 0.0)),
-                bbox=parsed,
-                page_no=page_no,
-            ))
+            box = _bbox(raw.get("coordinate"))
+            if box:
+                page_blocks.append(StructureBlock(str(raw.get("label", "unknown")), float(raw.get("score", 0.0)), box, page_no=page_no))
         blocks.extend(page_blocks)
         tables.extend(_table_from_payload(payload, page_no, page_blocks))
     return StructureDocument(width, height, blocks, tables)
 
 
 class PPStructureV3Engine:
-    """Optional layout/table pipeline kept separate from Production OCR."""
+    """PP-StructureV3 only: image -> block/table/cell layout."""
 
     def __init__(self) -> None:
         self._pipeline: Any | None = None
