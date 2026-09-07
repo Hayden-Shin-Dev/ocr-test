@@ -47,6 +47,37 @@ class OCRResultTests(unittest.TestCase):
         self.assertEqual(fields[1].label, "BOOKING NO.")
         self.assertEqual(fields[1].value, "74482")
 
+    def test_does_not_merge_adjacent_columns_on_the_same_row(self) -> None:
+        lines = parse_ocr_result([{
+            "rec_texts": ["BILL OF LADING", "BOOKING NO.", "CONSIGNEE", "ACME CO."],
+            "rec_scores": [0.99, 0.99, 0.99, 0.99],
+            "dt_polys": [
+                [[20, 10], [230, 10], [230, 28], [20, 28]],
+                [[270, 10], [370, 10], [370, 28], [270, 28]],
+                [[20, 50], [115, 50], [115, 68], [20, 68]],
+                [[20, 74], [110, 74], [110, 92], [20, 92]],
+            ],
+        }])
+
+        fields = build_field_mappings(lines)
+
+        self.assertEqual(fields[0].label, "BILL OF LADING")
+        self.assertEqual(fields[0].value, "")
+        self.assertEqual(fields[1].label, "BOOKING NO.")
+        self.assertEqual(fields[2].value, "ACME CO.")
+
+    def test_splits_inline_label_and_value(self) -> None:
+        lines = parse_ocr_result({
+            "rec_texts": ["PORT OF LOADING: BUSAN, KOREA"],
+            "rec_scores": [0.97],
+            "dt_polys": [[[10, 10], [250, 10], [250, 30], [10, 30]]],
+        })
+
+        fields = build_field_mappings(lines)
+
+        self.assertEqual(fields[0].label, "PORT OF LOADING")
+        self.assertEqual(fields[0].value, "BUSAN, KOREA")
+
 
 if __name__ == "__main__":
     unittest.main()

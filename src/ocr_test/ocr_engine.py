@@ -195,7 +195,7 @@ def _same_visual_column(first: tuple[float, float, float, float], second: tuple[
     overlap = max(0.0, min(first_right, second_right) - max(first_left, second_left))
     shortest_width = max(1.0, min(first_right - first_left, second_right - second_left))
     left_distance = abs(first_left - second_left)
-    return overlap / shortest_width >= 0.25 or left_distance <= max(14.0, shortest_width * 0.35)
+    return overlap / shortest_width >= 0.6 or left_distance <= max(18.0, shortest_width * 0.25)
 
 
 def _connected_vertically(first: tuple[float, float, float, float], second: tuple[float, float, float, float]) -> bool:
@@ -207,6 +207,10 @@ def _connected_vertically(first: tuple[float, float, float, float], second: tupl
         _, second_top, _, second_bottom = second
     first_height = max(1.0, first_bottom - first_top)
     second_height = max(1.0, second_bottom - second_top)
+    first_center = (first_top + first_bottom) / 2
+    second_center = (second_top + second_bottom) / 2
+    if abs(first_center - second_center) <= min(first_height, second_height) * 0.55:
+        return False
     gap = second_top - first_bottom
     return gap <= max(28.0, min(first_height, second_height) * 2.2)
 
@@ -218,17 +222,25 @@ def _looks_like_field_label(text: str) -> bool:
     if stripped.endswith(":") or ("(" in stripped and ")" in stripped):
         return True
     words = re.findall(r"[A-Za-z]+", stripped)
-    letters = re.findall(r"[A-Za-z]", stripped)
-    uppercase_ratio = sum(letter.isupper() for letter in letters) / max(1, len(letters))
     generic_markers = {
-        "ADDRESS", "AMOUNT", "CARRIER", "DATE", "DESCRIPTION", "DESTINATION",
+        "ADDRESS", "AMOUNT", "BILL", "BOOKING", "CARRIER", "CONSIGNEE", "DATE",
+        "DESCRIPTION", "DESTINATION", "DELIVERY", "FORWARDING", "FREIGHT",
+        "INSTRUCTIONS", "INVOICE", "LIABILITY", "LOADING", "MOVEMENT",
         "MEASUREMENT", "NAME", "NUMBER", "NO", "PACKAGES", "PORT", "PRICE",
-        "QUANTITY", "REFERENCE", "TOTAL", "UNIT", "VALUE", "WEIGHT",
+        "PARTICULARS", "QUANTITY", "REFERENCE", "REFERENCES", "ROUTING", "SHIPMENT",
+        "SHIPPER", "TOTAL", "UNIT", "VALUE", "WEIGHT", "COUNTRY", "CARRIAGE",
+        "INSURANCE", "DECLARED", "CHARGES", "RATES",
     }
-    return len(stripped) <= 90 and (
-        uppercase_ratio >= 0.8
-        or any(word.upper().rstrip(".") in generic_markers for word in words)
-    )
+    return len(stripped) <= 90 and any(word.upper().rstrip(".") in generic_markers for word in words)
+
+
+def _split_inline_label(text: str) -> tuple[str, str]:
+    if ":" not in text:
+        return text, ""
+    label, value = text.split(":", 1)
+    if label.strip() and value.strip():
+        return label.strip(), value.strip()
+    return text.rstrip(":"), ""
 
 
 def build_field_mappings(lines: list[OCRLine]) -> list[OCRField]:
@@ -243,7 +255,8 @@ def build_field_mappings(lines: list[OCRLine]) -> list[OCRField]:
         for block_index, block in enumerate(blocks):
             previous_index = block[-1]
             previous_box = boxes[previous_index]
-            if _same_visual_column(previous_box, box) and _connected_vertically(previous_box, box):
+            starts_new_field = _looks_like_field_label(lines[index].text)
+            if not starts_new_field and _same_visual_column(previous_box, box) and _connected_vertically(previous_box, box):
                 candidates.append((box[1] - previous_box[3], block_index))
         if candidates:
             _, chosen_block = min(candidates)
@@ -254,12 +267,11 @@ def build_field_mappings(lines: list[OCRLine]) -> list[OCRField]:
     fields: list[OCRField] = []
     for block in blocks:
         block_lines = [lines[index] for index in block]
-        label = block_lines[0].text
+        label, inline_value = _split_inline_label(block_lines[0].text)
         value_lines = block_lines[1:]
-        if not _looks_like_field_label(label) and len(value_lines) == 0:
-            value = ""
-        else:
-            value = " ".join(line.text for line in value_lines)
+        value_parts = [inline_value] if inline_value else []
+        value_parts.extend(line.text for line in value_lines)
+        value = " ".join(value_parts)
         confidence = sum(line.confidence for line in block_lines) / len(block_lines)
         block_boxes = [boxes[index] for index in block]
         fields.append(OCRField(
