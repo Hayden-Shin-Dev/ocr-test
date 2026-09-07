@@ -70,7 +70,7 @@ function resetResult() {
   state.result = null;
   $("#fullText").value = "";
   $("#lineList").className = "line-list empty-lines";
-  $("#lineList").innerHTML = "<p>추출을 실행하면 인식된 라인별 결과가 표시됩니다.</p>";
+  $("#lineList").innerHTML = "<p>추출을 실행하면 라벨과 값이 영역별로 매핑됩니다.</p>";
   $("#textStatus").textContent = "결과 대기 중";
   for (const selector of ["#lineCount", "#confidence", "#imageSize", "#elapsed"]) $(selector).textContent = "—";
   $("#copyButton").disabled = true;
@@ -79,8 +79,8 @@ function resetResult() {
 
 function renderResult(result) {
   state.result = result;
-  $("#fullText").value = result.text || "";
-  $("#textStatus").textContent = `${result.lines.length}개 라인 인식 완료`;
+  $("#fullText").value = result.structured_text || result.text || "";
+  $("#textStatus").textContent = `${result.fields?.length || 0}개 영역 매핑 완료`;
   const average = result.lines.length
     ? result.lines.reduce((sum, line) => sum + line.confidence, 0) / result.lines.length
     : 0;
@@ -91,24 +91,25 @@ function renderResult(result) {
   const list = $("#lineList");
   list.className = "line-list";
   list.innerHTML = "";
-  for (const [index, line] of result.lines.entries()) {
+  for (const field of result.fields || []) {
     const row = document.createElement("div");
     row.className = "line-row";
-    const number = document.createElement("span");
-    number.className = "line-number";
-    number.textContent = String(index + 1).padStart(2, "0");
-    const text = document.createElement("span");
-    text.className = "line-text";
-    text.textContent = line.text;
-    text.title = line.text;
+    const label = document.createElement("span");
+    label.className = "field-label";
+    label.textContent = field.label;
+    label.title = field.label;
+    const value = document.createElement("span");
+    value.className = "field-value";
+    value.textContent = field.value || "—";
+    value.title = field.value || "—";
     const score = document.createElement("span");
     score.className = "line-score";
-    score.textContent = `${(line.confidence * 100).toFixed(1)}%`;
-    row.append(number, text, score);
+    score.textContent = `${(field.confidence * 100).toFixed(1)}%`;
+    row.append(label, value, score);
     list.appendChild(row);
   }
-  $("#copyButton").disabled = !result.text;
-  $("#downloadButton").disabled = !result.text;
+  $("#copyButton").disabled = !(result.structured_text || result.text);
+  $("#downloadButton").disabled = !(result.structured_text || result.text);
 }
 
 async function runOCR() {
@@ -172,12 +173,12 @@ $("#fileInput").addEventListener("change", (event) => {
 
 $("#runButton").addEventListener("click", runOCR);
 $("#copyButton").addEventListener("click", async () => {
-  await navigator.clipboard.writeText(state.result?.text || "");
+  await navigator.clipboard.writeText(state.result?.structured_text || state.result?.text || "");
   $("#copyButton").textContent = "복사 완료";
   setTimeout(() => { $("#copyButton").textContent = "텍스트 복사"; }, 1400);
 });
 $("#downloadButton").addEventListener("click", () => {
-  const blob = new Blob([state.result?.text || ""], { type: "text/plain;charset=utf-8" });
+  const blob = new Blob([state.result?.structured_text || state.result?.text || ""], { type: "text/plain;charset=utf-8" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
   link.download = `${state.result?.source_name || "ocr-result"}.txt`;
