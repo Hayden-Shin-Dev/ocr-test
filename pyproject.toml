@@ -18,6 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 ocr = [
     "paddleocr>=3.0,<4",
+    "paddlex[ocr]>=3.7,<4",
     "paddlepaddle-gpu==3.3.1",
 ]
 
