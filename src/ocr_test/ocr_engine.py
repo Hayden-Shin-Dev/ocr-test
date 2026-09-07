@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from threading import Lock
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -41,6 +42,7 @@ class PaddleOCREngine:
 
     def __init__(self) -> None:
         self._pipeline: Any | None = None
+        self._lock = Lock()
 
     def _get_pipeline(self) -> Any:
         if self._pipeline is None:
@@ -60,8 +62,9 @@ class PaddleOCREngine:
         with Image.open(image_path) as image:
             width, height = image.size
 
-        raw_results = self._get_pipeline().predict(str(image_path))
-        lines = parse_ocr_result(raw_results)
+        with self._lock:
+            raw_results = self._get_pipeline().predict(str(image_path))
+            lines = parse_ocr_result(raw_results)
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         return OCRDocument(
             source_name=image_path.name,
