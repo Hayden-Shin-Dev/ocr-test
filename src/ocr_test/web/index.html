@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Logistics OCR Lab</title>
+    <link rel="stylesheet" href="/static/app.css" />
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Logistics OCR Lab home">
+          <span class="brand-mark">OCR</span>
+          <span>Logistics OCR Lab</span>
+        </a>
+        <span class="engine-pill"><span class="status-dot"></span> PP-OCRv5 · local</span>
+      </header>
+
+      <main>
+        <section class="hero">
+          <div>
+            <p class="eyebrow">GENERAL DOCUMENT EXTRACTION</p>
+            <h1>문서에서 텍스트를<br /><em>정확하게 꺼내세요.</em></h1>
+            <p class="hero-copy">상업송장, 포장명세서, 선하증권은 물론<br />새로운 문서도 이미지 그대로 분석합니다.</p>
+          </div>
+          <div class="hero-note">
+            <span class="note-index">01</span>
+            <span>검출된 모든 텍스트 라인을<br />좌표·신뢰도와 함께 확인합니다.</span>
+          </div>
+        </section>
+
+        <section class="control-card card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">INPUT DOCUMENT</p>
+              <h2>분석할 이미지 선택</h2>
+            </div>
+            <span id="sampleCount" class="muted-label">샘플 불러오는 중…</span>
+          </div>
+          <div class="controls-grid">
+            <label class="select-wrap">
+              <span class="control-label">로컬 샘플</span>
+              <select id="sampleSelect">
+                <option value="">샘플을 선택하세요</option>
+              </select>
+            </label>
+            <div class="or-divider"><span>또는</span></div>
+            <label class="upload-zone" for="fileInput">
+              <span class="upload-icon">↑</span>
+              <span><strong>이미지 업로드</strong><small>PNG, JPG, WEBP, TIFF · 최대 20MB</small></span>
+              <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff" />
+            </label>
+          </div>
+          <div class="action-row">
+            <span id="selectionLabel" class="selection-label">문서를 선택하면 분석할 수 있습니다.</span>
+            <button id="runButton" class="primary-button" type="button" disabled>텍스트 추출 <span>→</span></button>
+          </div>
+          <p id="errorMessage" class="error-message" role="alert" hidden></p>
+        </section>
+
+        <section class="results-header">
+          <div>
+            <p class="eyebrow">EXTRACTION RESULT</p>
+            <h2>추출 결과</h2>
+          </div>
+          <div class="result-actions">
+            <button id="copyButton" class="secondary-button" type="button" disabled>텍스트 복사</button>
+            <button id="downloadButton" class="secondary-button" type="button" disabled>TXT 저장</button>
+          </div>
+        </section>
+
+        <section class="result-grid">
+          <article class="card preview-card">
+            <div class="card-heading compact">
+              <h3>원본 문서</h3>
+              <span id="sourceName" class="muted-label">선택 대기 중</span>
+            </div>
+            <div class="image-frame">
+              <div id="emptyPreview" class="empty-state"><span>▧</span><p>분석할 이미지를<br />선택하세요</p></div>
+              <img id="previewImage" alt="선택한 문서 미리보기" hidden />
+            </div>
+          </article>
+
+          <article class="card text-card">
+            <div class="card-heading compact">
+              <h3>전체 텍스트</h3>
+              <span id="textStatus" class="muted-label">결과 대기 중</span>
+            </div>
+            <textarea id="fullText" readonly placeholder="추출된 텍스트가 여기에 표시됩니다."></textarea>
+            <div id="lineList" class="line-list empty-lines"><p>추출을 실행하면 인식된 라인별 결과가 표시됩니다.</p></div>
+          </article>
+        </section>
+
+        <section class="stats-grid" aria-label="OCR statistics">
+          <div class="stat-card"><span>텍스트 라인</span><strong id="lineCount">—</strong></div>
+          <div class="stat-card"><span>평균 신뢰도</span><strong id="confidence">—</strong></div>
+          <div class="stat-card"><span>이미지 크기</span><strong id="imageSize">—</strong></div>
+          <div class="stat-card"><span>처리 시간</span><strong id="elapsed">—</strong></div>
+        </section>
+      </main>
+
+      <footer>로컬 환경에서 실행 중 · 원본 이미지는 서버에 저장하지 않습니다.</footer>
+    </div>
+  </body>
+</html>

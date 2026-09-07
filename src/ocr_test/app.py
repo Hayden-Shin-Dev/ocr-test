@@ -4,6 +4,7 @@ import io
 import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -53,7 +54,7 @@ def _sample_items() -> list[dict[str, str]]:
                 "path": relative,
                 "name": path.name,
                 "document_type": path.parent.name,
-                "url": f"/api/sample-image?path={relative}",
+                "url": f"/api/sample-image?path={quote(relative)}",
             })
     return items
 
