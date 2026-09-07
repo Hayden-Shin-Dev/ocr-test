@@ -80,7 +80,9 @@ function resetResult() {
 function renderResult(result) {
   state.result = result;
   $("#fullText").value = result.structured_text || result.text || "";
-  $("#textStatus").textContent = `${result.fields?.length || 0}개 영역 매핑 완료`;
+  const layoutMode = result.layout_mode || "coordinate_fallback";
+  const lowConfidence = result.low_confidence_count || 0;
+  $("#textStatus").textContent = `${result.fields?.length || 0}개 영역 · ${layoutMode} · 저신뢰 ${lowConfidence}개`;
   const average = result.lines.length
     ? result.lines.reduce((sum, line) => sum + line.confidence, 0) / result.lines.length
     : 0;
@@ -100,8 +102,9 @@ function renderResult(result) {
     label.title = field.label;
     const value = document.createElement("span");
     value.className = "field-value";
-    value.textContent = field.value || "—";
-    value.title = field.value || "—";
+    const displayValue = Array.isArray(field.value) ? field.value.join(" | ") : field.value;
+    value.textContent = displayValue || "—";
+    value.title = displayValue || "—";
     const score = document.createElement("span");
     score.className = "line-score";
     score.textContent = `${(field.confidence * 100).toFixed(1)}%`;
