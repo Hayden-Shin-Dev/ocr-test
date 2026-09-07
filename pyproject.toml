@@ -5,10 +5,21 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ocr-test"
 version = "0.1.0"
-description = "A minimal starter project for OCR experiments"
+description = "A general-purpose PaddleOCR web app for logistics documents"
 readme = "README.md"
 requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "pillow>=10,<12",
+    "python-multipart>=0.0.9,<1",
+    "uvicorn[standard]>=0.30,<1",
+]
+
+[project.optional-dependencies]
+ocr = [
+    "paddleocr>=3.0,<4",
+    "paddlepaddle>=3.0,<4",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
