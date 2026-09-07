@@ -29,6 +29,7 @@ class PPStructureTests(unittest.TestCase):
         self.assertEqual(result.blocks[0].label, "table")
         self.assertEqual(len(result.tables), 1)
         self.assertEqual(len(result.tables[0].cells), 8)
+        self.assertEqual(result.reading_order, [0])
 
     def test_unifies_production_ocr_lines_with_structure_cells(self) -> None:
         structure = parse_structure_result({

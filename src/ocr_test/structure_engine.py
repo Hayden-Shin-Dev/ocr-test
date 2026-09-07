@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import statistics
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from threading import Lock
 from typing import Any, Mapping, Sequence
@@ -45,6 +45,7 @@ class StructureDocument:
     height: int
     blocks: list[StructureBlock]
     tables: list[StructureTable]
+    reading_order: list[int] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -179,7 +180,11 @@ def parse_structure_result(results: Any, width: int, height: int) -> StructureDo
                 page_blocks.append(StructureBlock(str(raw.get("label", "unknown")), float(raw.get("score", 0.0)), box, page_no=page_no))
         blocks.extend(page_blocks)
         tables.extend(_table_from_payload(payload, page_no, page_blocks))
-    return StructureDocument(width, height, blocks, tables)
+    reading_order = sorted(
+        range(len(blocks)),
+        key=lambda index: (blocks[index].page_no, blocks[index].bbox["y0"], blocks[index].bbox["x0"]),
+    )
+    return StructureDocument(width, height, blocks, tables, reading_order)
 
 
 class PPStructureV3Engine:
