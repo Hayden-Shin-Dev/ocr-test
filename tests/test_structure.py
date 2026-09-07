@@ -1,6 +1,7 @@
 import unittest
 
 from ocr_test.extractor_v2 import extract_with_structure
+from ocr_test.field_schema import FieldDefinition, FieldSchema
 from ocr_test.ocr_engine import OCRLine
 from ocr_test.structure_engine import parse_structure_result
 
@@ -47,7 +48,8 @@ class PPStructureTests(unittest.TestCase):
             text_line("A-1", 5, 25), text_line("2", 55, 25), text_line("Widget", 105, 25), text_line("10", 155, 25),
         ]
 
-        result = extract_with_structure(lines, structure)
+        schema = FieldSchema(tuple(FieldDefinition(name) for name in ("Code", "Qty", "Description", "Amount")), "test")
+        result = extract_with_structure(lines, structure, schema=schema)
 
         self.assertEqual(result.layout_mode, "pp_structure")
         self.assertEqual(len(result.structure.tables[0].cells[0].line_indices), 1)

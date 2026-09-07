@@ -12,8 +12,12 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .compatibility import map_ocr_lines
 from .config import settings
+from .extractor_v2 import extract_with_structure
+from .field_schema import load_field_schema
 from .ocr_engine import OCRDocument, engine
+from .structure_engine import structure_engine
 
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
@@ -84,7 +88,40 @@ async def _run_path(path: Path, source: str) -> dict[str, Any]:
         document = await run_in_threadpool(engine.predict, path)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"OCR inference failed: {exc}") from exc
-    return _document_response(document, source)
+    mapping = map_ocr_lines(document.lines)
+    response = _document_response(document, source)
+    response["fields"] = [field.as_dict() for field in mapping.fields]
+    response["layout_mode"] = mapping.layout_mode
+    response["low_confidence_count"] = mapping.low_confidence_count
+    response["structured_text"] = "\n".join(
+        f"{field.label}: {' | '.join(field.value) if isinstance(field.value, list) else field.value}"
+        if field.value else field.label
+        for field in mapping.fields
+    )
+    return response
+
+
+async def _run_pp_structure_path(path: Path, source: str) -> dict[str, Any]:
+    try:
+        document = await run_in_threadpool(engine.predict, path)
+        structure = await run_in_threadpool(structure_engine.predict, path)
+        extracted = extract_with_structure(document.lines, structure, schema=load_field_schema())
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"PP-Structure OCR inference failed: {exc}") from exc
+    response = _document_response(document, source)
+    response["fields"] = [field.as_dict() for field in extracted.fields]
+    response["structured_text"] = "\n".join(
+        f"{field.label}: {' | '.join(field.value) if isinstance(field.value, list) else field.value}"
+        if field.value else field.label
+        for field in extracted.fields
+    )
+    response["layout_mode"] = extracted.layout_mode
+    response["low_confidence_count"] = extracted.low_confidence_count
+    response["schema_source"] = extracted.schema_source
+    response["schema_field_count"] = extracted.schema_field_count
+    response["extractor_version"] = "v2-pp-structure"
+    response["structure"] = extracted.structure.as_dict()
+    return response
 
 
 @app.get("/", response_class=FileResponse)
@@ -113,6 +150,12 @@ def sample_image(path: str) -> FileResponse:
 async def ocr_sample(request: SampleRequest) -> dict[str, Any]:
     image_path = _resolve_sample(request.path)
     return await _run_path(image_path, source=f"sample:{request.path}")
+
+
+@app.post("/api/ocr/pp-structure/sample")
+async def ocr_pp_structure_sample(request: SampleRequest) -> dict[str, Any]:
+    image_path = _resolve_sample(request.path)
+    return await _run_pp_structure_path(image_path, source=f"sample:{request.path}")
 
 
 @app.post("/api/ocr")

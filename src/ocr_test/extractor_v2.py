@@ -1,22 +1,14 @@
 from __future__ import annotations
 
+import difflib
+import re
 import statistics
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable
 
-from .ocr_engine import OCRField, OCRLine, OCRMapping, _line_bbox, map_ocr_lines
+from .field_schema import FieldDefinition, FieldSchema, load_field_schema
+from .models import OCRField, OCRLine, OCRMapping
 from .structure_engine import StructureBlock, StructureCell, StructureDocument, StructureTable
-
-
-LABEL_WORDS = {
-    "ADDRESS", "AMOUNT", "BILL", "BOOKING", "CARRIER", "CONSIGNEE", "COUNTRY",
-    "DATE", "DESCRIPTION", "DESTINATION", "DELIVERY", "DISPATCH", "EXPORT",
-    "FINAL", "FORWARDING", "FREIGHT", "HS", "INVOICE", "LETTER", "LOADING",
-    "MARINE", "METHOD", "NAME", "NUMBER", "NO", "NOTIFY", "ORIGIN", "PACKAGES",
-    "PARTY", "PAYMENT", "PORT", "PRICE", "PRODUCT", "QUANTITY", "REFERENCE",
-    "SHIPMENT", "SHIPPER", "SIGNATURE", "SIGNATORY", "TERMS", "TOTAL", "TYPE",
-    "UNIT", "VALUE", "VESSEL", "VOYAGE", "WEIGHT", "ZIP", "CODE", "CURRENCY",
-}
 
 
 @dataclass(frozen=True)
@@ -54,18 +46,39 @@ class UnifiedDocumentStructure:
 
 
 @dataclass(frozen=True)
+class _LabelCandidate:
+    definition: FieldDefinition
+    line_index: int
+    label_text: str
+    inline_value: str | None
+    match_score: float
+    region_index: int
+    cell: UnifiedTableCell | None = None
+
+
+@dataclass(frozen=True)
 class ExtractorV2Result:
     fields: list[OCRField]
     structure: UnifiedDocumentStructure
     layout_mode: str
+    low_confidence_count: int
+    schema_source: str | None
+    schema_field_count: int
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "fields": [field.as_dict() for field in self.fields],
             "structure": self.structure.as_dict(),
             "layout_mode": self.layout_mode,
-            "extractor_version": "v2-pp-structure",
+            "low_confidence_count": self.low_confidence_count,
+            "schema_source": self.schema_source,
+            "schema_field_count": self.schema_field_count,
+            "extractor_version": "v2-schema-driven",
         }
+
+
+def _box(line: OCRLine) -> dict[str, float]:
+    return line.bbox
 
 
 def _area(box: dict[str, float]) -> float:
@@ -77,12 +90,13 @@ def _intersection_ratio(first: dict[str, float], second: dict[str, float]) -> fl
     y0 = max(first["y0"], second["y0"])
     x1 = min(first["x1"], second["x1"])
     y1 = min(first["y1"], second["y1"])
-    return max(0.0, x1 - x0) * max(0.0, y1 - y0) / min(_area(first), _area(second))
+    intersection = max(0.0, x1 - x0) * max(0.0, y1 - y0)
+    return intersection / min(_area(first), _area(second))
 
 
-def _line_center(line: OCRLine) -> tuple[float, float]:
-    box = _line_bbox(line)
-    return ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+def _x_overlap(first: dict[str, float], second: dict[str, float]) -> float:
+    overlap = max(0.0, min(first["x1"], second["x1"]) - max(first["x0"], second["x0"]))
+    return overlap / max(1.0, min(first["x1"] - first["x0"], second["x1"] - second["x0"]))
 
 
 def _line_indices_in_box(lines: list[OCRLine], box: dict[str, float], page_no: int) -> list[int]:
@@ -90,8 +104,9 @@ def _line_indices_in_box(lines: list[OCRLine], box: dict[str, float], page_no: i
     for index, line in enumerate(lines):
         if line.page_no != page_no:
             continue
-        line_box = line.bbox
-        center_x, center_y = _line_center(line)
+        line_box = _box(line)
+        center_x = (line_box["x0"] + line_box["x1"]) / 2
+        center_y = (line_box["y0"] + line_box["y1"]) / 2
         if (
             box["x0"] <= center_x <= box["x1"]
             and box["y0"] <= center_y <= box["y1"]
@@ -100,7 +115,9 @@ def _line_indices_in_box(lines: list[OCRLine], box: dict[str, float], page_no: i
     return result
 
 
-def build_unified_structure(lines: list[OCRLine], structure: StructureDocument) -> UnifiedDocumentStructure:
+def build_unified_structure(lines: list[OCRLine], structure: StructureDocument | None) -> UnifiedDocumentStructure:
+    if structure is None:
+        return UnifiedDocumentStructure([], [])
     blocks = [
         UnifiedBlock(
             label=block.label,
@@ -111,7 +128,7 @@ def build_unified_structure(lines: list[OCRLine], structure: StructureDocument) 
         )
         for block in structure.blocks
     ]
-    tables: list[UnifiedTable] = []
+    tables = []
     for table in structure.tables:
         cells = [
             UnifiedTableCell(
@@ -127,134 +144,235 @@ def build_unified_structure(lines: list[OCRLine], structure: StructureDocument) 
     return UnifiedDocumentStructure(blocks, tables)
 
 
-def _rows(lines: list[OCRLine], indices: Iterable[int]) -> list[list[int]]:
-    selected = list(indices)
-    if not selected:
-        return []
-    heights = [max(1.0, _line_bbox(lines[index])[3] - _line_bbox(lines[index])[1]) for index in selected]
-    tolerance = statistics.median(heights) * 0.6
-    rows: list[list[int]] = []
-    for index in sorted(selected, key=lambda item: (_line_center(lines[item])[1], _line_center(lines[item])[0])):
-        center_y = _line_center(lines[index])[1]
-        matching = [row for row in rows if abs(statistics.mean(_line_center(lines[item])[1] for item in row) - center_y) <= tolerance]
-        if matching:
-            matching[0].append(index)
+def _normalise(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", text.casefold())
+
+
+def _label_match(text: str, definition: FieldDefinition) -> tuple[float, str, str | None]:
+    source = text.strip()
+    left, separator, right = source.partition(":")
+    candidates = [(alias, left if separator else source) for alias in definition.labels if alias.strip()]
+    best_score = 0.0
+    best_label = source
+    best_value: str | None = None
+    for alias, comparison in candidates:
+        alias_norm = _normalise(alias)
+        comparison_norm = _normalise(comparison)
+        if not alias_norm or not comparison_norm:
+            continue
+        if comparison_norm == alias_norm:
+            score = 1.0
+        elif comparison_norm.startswith(alias_norm):
+            score = 0.91
+        elif alias_norm in comparison_norm and len(alias_norm) >= 5:
+            score = 0.84
         else:
-            rows.append([index])
-    for row in rows:
-        row.sort(key=lambda item: _line_center(lines[item])[0])
-    return rows
+            score = difflib.SequenceMatcher(None, comparison_norm, alias_norm).ratio()
+            if score < 0.78:
+                continue
+        if score > best_score:
+            best_score = score
+            best_label = left.strip() if separator else source
+            best_value = right.strip() if separator and right.strip() else None
+    return best_score, best_label, best_value
 
 
-def _join_rows(lines: list[OCRLine], rows: list[list[int]]) -> list[str]:
-    return [" ".join(lines[index].text for index in row) for row in rows]
-
-
-def _is_label(text: str) -> bool:
-    words = [word.strip(".,:/()") for word in text.upper().split()]
-    return bool(text.rstrip().endswith(":") or any(word in LABEL_WORDS for word in words))
-
-
-def _split_inline(text: str) -> tuple[str, list[str]]:
-    if ":" not in text:
-        return text, []
-    label, value = text.split(":", 1)
-    return (label.strip(), [value.strip()]) if label.strip() and value.strip() else (text.rstrip(":"), [])
-
-
-def _field_from_lines(lines: list[OCRLine], indices: list[int], bbox: dict[str, float], score: float) -> OCRField | None:
-    if not indices:
+def _best_label(text: str, schema: FieldSchema) -> tuple[FieldDefinition, float, str, str | None] | None:
+    matches = []
+    for definition in schema.fields:
+        score, label, value = _label_match(text, definition)
+        if score:
+            matches.append((score, definition, label, value))
+    if not matches:
         return None
-    grouped = _join_rows(lines, _rows(lines, indices))
-    if not grouped:
-        return None
-    label, inline_values = _split_inline(grouped[0])
-    values = inline_values + grouped[1:]
-    average_ocr = statistics.mean(lines[index].confidence for index in indices)
-    confidence = min(1.0, 0.55 + score * 0.2 + average_ocr * 0.25)
+    score, definition, label, value = max(matches, key=lambda item: item[0])
+    return definition, score, label, value
+
+
+def _region_units(lines: list[OCRLine], unified: UnifiedDocumentStructure) -> list[tuple[list[int], list[UnifiedTableCell], float]]:
+    units: list[tuple[list[int], list[UnifiedTableCell], float]] = []
+    for table in unified.tables:
+        indices = _line_indices_in_box(lines, table.bbox, table.page_no)
+        if indices:
+            units.append((indices, table.cells, 0.9))
+    table_boxes = [table.bbox for table in unified.tables]
+    for block in unified.blocks:
+        if block.label.casefold() in {"table", "figure", "image"}:
+            continue
+        if any(_intersection_ratio(block.bbox, table_box) >= 0.5 for table_box in table_boxes):
+            continue
+        if block.line_indices:
+            units.append((block.line_indices, [], max(0.0, min(1.0, block.score))))
+    if not units:
+        for page_no in sorted({line.page_no for line in lines}):
+            indices = [index for index, line in enumerate(lines) if line.page_no == page_no]
+            if indices:
+                units.append((indices, [], 0.0))
+    return units
+
+
+def _cell_for_line(index: int, cells: list[UnifiedTableCell]) -> UnifiedTableCell | None:
+    matches = [cell for cell in cells if index in cell.line_indices]
+    return min(matches, key=lambda cell: _area(cell.bbox), default=None)
+
+
+def _candidate_lines(
+    candidate: _LabelCandidate,
+    region_lines: list[int],
+    label_candidates: list[_LabelCandidate],
+    lines: list[OCRLine],
+    cells: list[UnifiedTableCell],
+) -> list[int]:
+    label_box = _box(lines[candidate.line_index])
+    heights = [max(1.0, _box(lines[index])["y1"] - _box(lines[index])["y0"]) for index in region_lines]
+    local_height = statistics.median(heights) if heights else 1.0
+    next_boundary: float | None = None
+    for other in label_candidates:
+        if other.line_index == candidate.line_index:
+            continue
+        other_box = _box(lines[other.line_index])
+        if other_box["y0"] <= label_box["y0"] + local_height:
+            continue
+        if _x_overlap(label_box, other_box) >= 0.15:
+            next_boundary = other_box["y0"]
+            break
+
+    selected = [candidate.line_index]
+    candidate_cell = candidate.cell
+    for index in sorted(region_lines, key=lambda item: (_box(lines[item])["y0"], _box(lines[item])["x0"])):
+        if index == candidate.line_index:
+            continue
+        current_box = _box(lines[index])
+        if current_box["y0"] < label_box["y1"] - local_height * 0.35:
+            continue
+        if next_boundary is not None and current_box["y0"] >= next_boundary:
+            continue
+        current_cell = _cell_for_line(index, cells)
+        same_column = bool(candidate_cell and current_cell and candidate_cell.column_index == current_cell.column_index)
+        same_row = bool(candidate_cell and current_cell and candidate_cell.row_index == current_cell.row_index)
+        overlap = _x_overlap(label_box, current_box)
+        nearby_column = abs(((label_box["x0"] + label_box["x1"]) / 2) - ((current_box["x0"] + current_box["x1"]) / 2)) <= local_height * 4
+        if overlap >= 0.12 or (same_column and current_box["y0"] > label_box["y1"]) or (same_row and current_box["x0"] >= label_box["x1"]):
+            selected.append(index)
+        elif nearby_column and current_box["y0"] - label_box["y1"] <= local_height * 2:
+            selected.append(index)
+    return sorted(set(selected), key=lambda item: (_box(lines[item])["y0"], _box(lines[item])["x0"]))
+
+
+def _datatype_valid(value: str, datatype: str) -> bool:
+    kind = datatype.casefold()
+    if not value.strip():
+        return False
+    if kind in {"number", "integer", "decimal", "quantity", "amount"}:
+        return bool(re.search(r"\d", value))
+    if kind in {"date", "datetime"}:
+        return bool(re.search(r"\b\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}\b", value))
+    if kind in {"currency", "money"}:
+        return bool(re.search(r"(?:[$€£¥]|\b[A-Z]{3}\b)\s*[-+]?\d", value, re.I))
+    return True
+
+
+def _union_bbox(lines: list[OCRLine], indices: Iterable[int]) -> dict[str, float]:
+    boxes = [_box(lines[index]) for index in indices]
+    return {
+        "x0": min(box["x0"] for box in boxes),
+        "y0": min(box["y0"] for box in boxes),
+        "x1": max(box["x1"] for box in boxes),
+        "y1": max(box["y1"] for box in boxes),
+    }
+
+
+def _make_field(
+    candidate: _LabelCandidate,
+    selected: list[int],
+    lines: list[OCRLine],
+    structure_score: float,
+) -> OCRField:
+    values: list[str] = []
+    if candidate.inline_value:
+        values.append(candidate.inline_value)
+    for index in selected:
+        if index == candidate.line_index:
+            continue
+        text = lines[index].text.strip()
+        if text:
+            values.append(text)
+    valid_values = [value for value in values if _datatype_valid(value, candidate.definition.datatype)]
+    average_ocr = statistics.mean(lines[index].confidence for index in selected)
+    datatype_score = 1.0 if not values or len(valid_values) == len(values) else 0.65
+    confidence = min(1.0, 0.45 * candidate.match_score + 0.25 * average_ocr + 0.2 * structure_score + 0.1 * datatype_score)
     return OCRField(
-        label=label.rstrip(":"),
-        value=values,
+        label=candidate.definition.name,
+        value=valid_values or None,
         confidence=round(confidence, 4),
-        raw_lines=[lines[index].as_dict() for index in indices],
-        bbox=bbox,
-        mapping_method="pp_structure",
+        raw_lines=[lines[index].as_dict() for index in selected],
+        bbox=_union_bbox(lines, selected),
+        mapping_method="schema_geometry" if structure_score else "schema_coordinate",
+        schema_name=candidate.definition.name,
+        datatype=candidate.definition.datatype,
     )
 
 
-def _table_has_header_row(table: UnifiedTable, lines: list[OCRLine]) -> bool:
-    row_groups: dict[int, list[UnifiedTableCell]] = {}
-    for cell in table.cells:
-        row_groups.setdefault(cell.row_index, []).append(cell)
-    if not row_groups:
-        return False
-    first_row = row_groups[min(row_groups)]
-    populated = [cell for cell in first_row if cell.line_indices]
-    if len(populated) < 4:
-        return False
-    return sum(_is_label(" ".join(lines[index].text for index in cell.line_indices)) for cell in populated) >= len(populated) * 0.5
-
-
-def _table_fields(table: UnifiedTable, lines: list[OCRLine]) -> list[OCRField]:
-    if not table.cells:
-        return []
-    by_row: dict[int, list[UnifiedTableCell]] = {}
-    by_column: dict[int, list[UnifiedTableCell]] = {}
-    for cell in table.cells:
-        by_row.setdefault(cell.row_index, []).append(cell)
-        by_column.setdefault(cell.column_index, []).append(cell)
-    fields: list[OCRField] = []
-    if _table_has_header_row(table, lines):
-        header_row = min(by_row)
-        headers = {cell.column_index: " ".join(lines[index].text for index in cell.line_indices) for cell in by_row[header_row] if cell.line_indices}
-        for column, header in headers.items():
-            data_cells = [cell for cell in by_column.get(column, []) if cell.row_index != header_row and cell.line_indices]
-            if not data_cells:
-                continue
-            values = [" ".join(lines[index].text for index in _rows(lines, cell.line_indices)[0:1][0]) if _rows(lines, cell.line_indices) else "" for cell in data_cells]
-            indices = [index for cell in data_cells for index in cell.line_indices]
-            bbox = {
-                "x0": min(cell.bbox["x0"] for cell in data_cells),
-                "y0": min(cell.bbox["y0"] for cell in data_cells),
-                "x1": max(cell.bbox["x1"] for cell in data_cells),
-                "y1": max(cell.bbox["y1"] for cell in data_cells),
-            }
-            fields.append(OCRField(
-                label=header,
-                value=[value for value in values if value],
-                confidence=0.85,
-                raw_lines=[lines[index].as_dict() for index in indices],
-                bbox=bbox,
-                mapping_method="pp_structure_table",
-            ))
-        return fields
-    for cell in sorted(table.cells, key=lambda item: (item.row_index, item.column_index)):
-        field = _field_from_lines(lines, cell.line_indices, cell.bbox, 0.8)
-        if field:
-            fields.append(field)
-    return fields
-
-
-def extract_with_structure(lines: list[OCRLine], structure: StructureDocument) -> ExtractorV2Result:
+def extract_with_structure(
+    lines: list[OCRLine],
+    structure: StructureDocument | None = None,
+    schema: FieldSchema | None = None,
+) -> ExtractorV2Result:
+    """Resolve OCR evidence against the externally supplied field schema."""
+    active_schema = schema if schema is not None else load_field_schema()
     unified = build_unified_structure(lines, structure)
-    fields: list[OCRField] = []
-    covered: set[int] = set()
-    for table in unified.tables:
-        fields.extend(_table_fields(table, lines))
-        covered.update(index for cell in table.cells for index in cell.line_indices)
-    for block in unified.blocks:
-        scoped = [index for index in block.line_indices if index not in covered]
-        if not scoped or block.label.lower() in {"table", "figure", "image"}:
+    regions = _region_units(lines, unified)
+    candidates: list[tuple[_LabelCandidate, list[int], float]] = []
+    for region_index, (region_lines, cells, structure_score) in enumerate(regions):
+        labels: list[_LabelCandidate] = []
+        for index in region_lines:
+            match = _best_label(lines[index].text, active_schema)
+            if not match:
+                continue
+            definition, score, label, inline_value = match
+            labels.append(_LabelCandidate(definition, index, label, inline_value, score, region_index, _cell_for_line(index, cells)))
+        for candidate in labels:
+            selected = _candidate_lines(candidate, region_lines, labels, lines, cells)
+            candidates.append((candidate, selected, structure_score))
+
+    # One schema role and one OCR evidence span may be assigned only once.
+    candidates.sort(key=lambda item: (item[0].match_score, len(item[1])), reverse=True)
+    chosen_by_name: dict[str, OCRField] = {}
+    used_lines: set[int] = set()
+    for candidate, selected, structure_score in candidates:
+        name = candidate.definition.name
+        if name in chosen_by_name or any(index in used_lines for index in selected):
             continue
-        field = _field_from_lines(lines, scoped, block.bbox, block.score)
-        if field:
-            fields.append(field)
-            covered.update(scoped)
-    if not fields:
-        baseline: OCRMapping = map_ocr_lines(lines)
-        fields = baseline.fields
-        mode = baseline.layout_mode
-    else:
-        mode = "pp_structure"
-    fields.sort(key=lambda field: (field.bbox["y0"], field.bbox["x0"]))
-    return ExtractorV2Result(fields, unified, mode)
+        field = _make_field(candidate, selected, lines, structure_score)
+        chosen_by_name[name] = field
+        used_lines.update(selected)
+
+    fields: list[OCRField] = []
+    empty_bbox = {"x0": 0.0, "y0": 0.0, "x1": 0.0, "y1": 0.0}
+    for definition in active_schema.fields:
+        fields.append(chosen_by_name.get(definition.name, OCRField(
+            label=definition.name,
+            value=None,
+            confidence=0.0,
+            raw_lines=[],
+            bbox=empty_bbox,
+            mapping_method="unresolved",
+            schema_name=definition.name,
+            datatype=definition.datatype,
+        )))
+    fields.sort(key=lambda field: (field.bbox["y0"], field.bbox["x0"], field.label))
+    mode = "pp_structure" if unified.blocks or unified.tables else "coordinate_fallback"
+    return ExtractorV2Result(
+        fields=fields,
+        structure=unified,
+        layout_mode=mode,
+        low_confidence_count=sum(field.confidence < 0.6 for field in fields if field.value is not None),
+        schema_source=active_schema.source,
+        schema_field_count=len(active_schema.fields),
+    )
+
+
+def map_ocr_lines(lines: list[OCRLine], schema: FieldSchema | None = None) -> OCRMapping:
+    """Extractor-owned mapping entry point used by compatibility code."""
+    result = extract_with_structure(lines, None, schema=schema)
+    return OCRMapping(result.fields, result.layout_mode, result.low_confidence_count)
