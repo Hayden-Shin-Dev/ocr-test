@@ -8,3 +8,11 @@ venv/
 dist/
 build/
 
+# Local OCR datasets and archives
+data/
+Sample.zip
+
+# OCR outputs and local runtime files
+outputs/
+*.jsonl
+*.log
