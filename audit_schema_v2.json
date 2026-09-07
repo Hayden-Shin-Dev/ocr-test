@@ -1,0 +1,94 @@
+{
+  "schema_name": "Fintra Audit Field Schema v2",
+  "version": "2.0",
+  "matching": "semantic_first",
+  "exact_alias_required": false,
+  "fields": [
+    {"name":"invoice_number","aliases":["invoice no","invoice #","invoice id"],"kind":"identifier","scope":"document","documents":["Commercial Invoice"],"description":"Unique identifier assigned to the commercial invoice."},
+    {"name":"invoice_date","aliases":["date of invoice","issue date"],"kind":"date","scope":"document","documents":["Commercial Invoice"],"description":"Date on which the commercial invoice was issued."},
+    {"name":"seller","aliases":["vendor","supplier"],"kind":"party","scope":"document","documents":["Commercial Invoice"],"description":"Party selling the goods or services."},
+    {"name":"buyer","aliases":["purchaser","customer","buyer company","buyer name"],"kind":"party","scope":"document","documents":["Commercial Invoice","Packing List"],"description":"Party purchasing the goods."},
+    {"name":"consignee","aliases":["receiver","ultimate receiver","ship to","consignee name","수하인","收货人"],"kind":"party","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Party designated to receive the shipped goods."},
+    {"name":"exporter","aliases":["exporting party"],"kind":"party","scope":"document","documents":["Commercial Invoice","Packing List"],"description":"Party exporting the goods from the origin country."},
+    {"name":"shipper","aliases":["consignor","sender","ship from"],"kind":"party","scope":"document","documents":["Packing List","B/L"],"description":"Party sending or tendering the goods for transportation."},
+    {"name":"notify_party","aliases":["notify party","notification party","notify contact"],"kind":"party","scope":"document","documents":["B/L"],"description":"Party that must be notified regarding shipment arrival or delivery."},
+
+    {"name":"lc_number","aliases":["letter of credit no","letter of credit number","lc no"],"kind":"identifier","scope":"document","documents":["Commercial Invoice"],"description":"Identifier of the letter of credit associated with the transaction."},
+    {"name":"lc_date","aliases":["letter of credit date"],"kind":"date","scope":"document","documents":["Commercial Invoice"],"description":"Date of the letter of credit."},
+    {"name":"bl_number","aliases":["bill of lading no","bill of lading number","b/l no","bl no"],"kind":"identifier","scope":"document","documents":["Commercial Invoice","B/L"],"description":"Unique identifier of the bill of lading."},
+    {"name":"purchase_order_number","aliases":["purchase order no","purchase order number","po no"],"kind":"identifier","scope":"document","documents":["Commercial Invoice","Packing List"],"description":"Purchase order identifier associated with the transaction."},
+    {"name":"po_number","kind":"identifier","scope":"item","documents":["Commercial Invoice","Packing List"],"description":"Purchase order identifier associated with a specific line item."},
+    {"name":"invoice_reference","aliases":["invoice ref","related invoice","buyer reference","reference"],"kind":"identifier","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Reference to a related commercial invoice or invoice transaction."},
+    {"name":"document_number","kind":"identifier","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"General identifier assigned to the document."},
+    {"name":"flight_number","kind":"identifier","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Flight identifier used for air transportation."},
+    {"name":"contract_number","kind":"identifier","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Identifier of the commercial or transport contract."},
+    {"name":"reference_number","kind":"identifier","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"General transaction or document reference identifier."},
+    {"name":"booking_number","aliases":["booking no","booking reference"],"kind":"identifier","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Booking identifier assigned to the shipment by a carrier or forwarder."},
+
+    {"name":"part_number","kind":"identifier","scope":"item","documents":["Commercial Invoice","Packing List"],"description":"Part identifier assigned to a line item."},
+    {"name":"sku","kind":"identifier","scope":"item","documents":["Commercial Invoice","Packing List"],"description":"Stock keeping unit identifier of a line item."},
+
+    {"name":"document_date","aliases":["date","issue date","document issue date"],"kind":"date","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"General issue or preparation date of the document."},
+    {"name":"currency","aliases":["currency code","invoice currency"],"kind":"currency","scope":"document","documents":["Commercial Invoice"],"description":"Currency used for monetary amounts in the invoice."},
+    {"name":"total_amount","aliases":["total","invoice total","grand total","total value"],"kind":"amount","scope":"document","documents":["Commercial Invoice"],"description":"Final total monetary amount stated on the invoice."},
+    {"name":"payment_terms","aliases":["terms of payment","payment method","payment conditions"],"kind":"text","scope":"document","documents":["Commercial Invoice"],"description":"Conditions defining when and how payment must be made."},
+    {"name":"incoterm","aliases":["delivery term","terms of delivery","incoterms"],"kind":"code","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"International commercial term defining delivery responsibility and risk transfer."},
+
+    {"name":"vessel","aliases":["vessel name","vessel / aircraft","ship name","aircraft"],"kind":"vessel","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Name of the vessel or main transport conveyance."},
+    {"name":"voyage_number","aliases":["voyage no","voyage reference"],"kind":"identifier","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Voyage identifier associated with the vessel or shipment."},
+
+    {"name":"departure_date","aliases":["date of departure","departure"],"kind":"date","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Date on which the shipment or conveyance departs."},
+    {"name":"shipment_date","kind":"date","scope":"document","documents":["B/L"],"description":"Date on which the goods were shipped or placed on board."},
+    {"name":"arrival_date","kind":"date","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Date on which the shipment arrives or is expected to arrive."},
+
+    {"name":"port_of_loading","aliases":["loading port","port of shipment","place of loading"],"kind":"location","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Port or place where goods are loaded onto the main conveyance."},
+    {"name":"port_of_discharge","aliases":["discharge port","unloading port","place of discharge"],"kind":"location","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Port or place where goods are discharged from the main conveyance."},
+    {"name":"place_of_receipt","kind":"location","scope":"document","documents":["B/L"],"description":"Place where the carrier first receives the goods."},
+    {"name":"place_of_delivery","aliases":["delivery place","place of delivery by carrier"],"kind":"location","scope":"document","documents":["B/L"],"description":"Place where the carrier is required to deliver the goods."},
+    {"name":"final_destination","aliases":["country of final destination","destination","final delivery destination"],"kind":"location","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Final destination of the transported goods."},
+
+    {"name":"container_number","kind":"identifier","scope":"document","documents":["Packing List","B/L"],"description":"Identifier assigned to the freight container."},
+    {"name":"seal_number","kind":"identifier","scope":"document","documents":["Packing List","B/L"],"description":"Identifier of the security seal applied to a container or shipment."},
+
+    {"name":"package_count","aliases":["number of packages","packages","total packages"],"kind":"quantity","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Total number of packages in the shipment."},
+    {"name":"package_type","kind":"text","scope":"document","documents":["Packing List","B/L"],"description":"Type of packaging used for the shipment."},
+    {"name":"carton_count","kind":"quantity","scope":"document","documents":["Packing List","B/L"],"description":"Total number of cartons."},
+    {"name":"pallet_count","kind":"quantity","scope":"document","documents":["Packing List","B/L"],"description":"Total number of pallets."},
+
+    {"name":"gross_weight","aliases":["gross wt","gross mass"],"kind":"weight","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Weight of goods including packaging."},
+    {"name":"net_weight","aliases":["net wt","net mass"],"kind":"weight","scope":"document","documents":["Packing List","B/L"],"description":"Weight of goods excluding packaging."},
+    {"name":"weight_unit","kind":"unit","scope":"document","documents":["Packing List","B/L"],"description":"Unit used for weight measurements."},
+    {"name":"measurement","kind":"measurement","scope":"document","documents":["Packing List","B/L"],"description":"Shipment volume or dimensional measurement."},
+    {"name":"cbm","kind":"measurement","scope":"document","documents":["Packing List","B/L"],"description":"Shipment volume expressed in cubic metres."},
+    {"name":"shipment_type","aliases":["type of shipment","shipment method"],"kind":"text","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Classification or type of shipment."},
+
+    {"name":"goods_description","kind":"text","scope":"item","documents":["B/L"],"description":"Description of goods or commodities carried under the bill of lading."},
+    {"name":"description","kind":"text","scope":"item","documents":["Commercial Invoice","Packing List"],"description":"Description of a specific product or line item."},
+    {"name":"hs_code","kind":"identifier","scope":"item","documents":["Commercial Invoice","Packing List"],"description":"Harmonized System tariff classification code for a line item."},
+    {"name":"quantity","kind":"quantity","scope":"item","documents":["Commercial Invoice","Packing List"],"description":"Quantity of a specific line item."},
+    {"name":"unit","kind":"unit","scope":"item","documents":["Commercial Invoice","Packing List"],"description":"Unit of measure associated with a line item quantity."},
+    {"name":"unit_price","kind":"amount","scope":"item","documents":["Commercial Invoice"],"description":"Price per individual unit of a line item."},
+    {"name":"amount","kind":"amount","scope":"item","documents":["Commercial Invoice"],"description":"Extended monetary amount for a line item."},
+    {"name":"line_number","kind":"quantity","scope":"item","documents":["Commercial Invoice","Packing List"],"description":"Sequential number identifying a row or line item."},
+    {"name":"product_code","kind":"identifier","scope":"item","documents":["Commercial Invoice","Packing List"],"description":"Product identifier associated with a line item."},
+    {"name":"shipping_mark","kind":"text","scope":"item","documents":["Commercial Invoice","Packing List","B/L"],"description":"Marks or numbers used to identify packages or shipped goods."},
+
+    {"name":"country_of_origin","kind":"location","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Country where the goods originate or were produced."},
+    {"name":"country_of_destination","kind":"location","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Country to which the goods are ultimately destined."},
+
+    {"name":"carrier","kind":"party","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Transport company or carrier responsible for moving the shipment."},
+    {"name":"bank","kind":"party","scope":"document","documents":["Commercial Invoice"],"description":"Bank involved in payment or documentary credit for the transaction."},
+    {"name":"manufacturer","kind":"party","scope":"document","documents":["Commercial Invoice","Packing List"],"description":"Party that manufactured or produced the goods."},
+    {"name":"signatory_company","kind":"party","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Company represented by the authorized signatory on the document."},
+
+    {"name":"delivery_terms","kind":"text","scope":"document","documents":["Commercial Invoice"],"description":"Contractual conditions governing delivery of the goods."},
+    {"name":"method_of_dispatch","aliases":["method of dispatch","mode of transport","transport method"],"kind":"text","scope":"document","documents":["Commercial Invoice","Packing List","B/L"],"description":"Method or mode by which goods are dispatched or transported."},
+
+    {"name":"freight","kind":"amount","scope":"document","documents":["Commercial Invoice"],"description":"Freight charge stated separately from the goods value."},
+    {"name":"insurance","kind":"amount","scope":"document","documents":["Commercial Invoice"],"description":"Insurance charge stated separately from the goods value."},
+    {"name":"tax","kind":"amount","scope":"document","documents":["Commercial Invoice"],"description":"Tax or VAT amount stated on the invoice."},
+    {"name":"discount","kind":"amount","scope":"document","documents":["Commercial Invoice"],"description":"Discount amount deducted from the invoice value."},
+    {"name":"subtotal","kind":"amount","scope":"document","documents":["Commercial Invoice"],"description":"Intermediate total before final charges, discounts, or taxes."},
+    {"name":"other_charges","kind":"amount","scope":"document","documents":["Commercial Invoice"],"description":"Additional monetary charges not represented by another specific charge field."}
+  ]
+}

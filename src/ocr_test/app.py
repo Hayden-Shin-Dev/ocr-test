@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import io
+import re
 import tempfile
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -69,6 +71,33 @@ def _document_response(document: OCRDocument, source: str) -> dict[str, Any]:
     return response
 
 
+def _field_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return " | ".join(value) if isinstance(value, list) else str(value)
+
+
+def _normalise_field_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+
+def _legacy_comparison(legacy_fields: list[dict[str, Any]], new_fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    comparison = []
+    for new_field in new_fields:
+        target = _normalise_field_name(new_field["label"])
+        ranked = sorted(
+            legacy_fields,
+            key=lambda field: SequenceMatcher(None, target, _normalise_field_name(field["label"])).ratio(),
+            reverse=True,
+        )
+        comparison.append({
+            "field": new_field["label"],
+            "legacy": ranked[0] if ranked and SequenceMatcher(None, target, _normalise_field_name(ranked[0]["label"])).ratio() >= 0.45 else None,
+            "new": new_field,
+        })
+    return comparison
+
+
 def _validate_upload(data: bytes, filename: str | None) -> str:
     suffix = Path(filename or "upload.png").suffix.lower()
     if suffix not in IMAGE_SUFFIXES:
@@ -94,7 +123,7 @@ async def _run_path(path: Path, source: str) -> dict[str, Any]:
     response["layout_mode"] = mapping.layout_mode
     response["low_confidence_count"] = mapping.low_confidence_count
     response["structured_text"] = "\n".join(
-        f"{field.label}: {' | '.join(field.value) if isinstance(field.value, list) else field.value}"
+        f"{field.label}: {_field_text(field.value)}"
         if field.value else field.label
         for field in mapping.fields
     )
@@ -106,12 +135,13 @@ async def _run_pp_structure_path(path: Path, source: str) -> dict[str, Any]:
         document = await run_in_threadpool(engine.predict, path)
         structure = await run_in_threadpool(structure_engine.predict, path)
         extracted = extract_with_structure(document.lines, structure, schema=load_field_schema())
+        legacy = map_ocr_lines(document.lines)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"PP-Structure OCR inference failed: {exc}") from exc
     response = _document_response(document, source)
     response["fields"] = [field.as_dict() for field in extracted.fields]
     response["structured_text"] = "\n".join(
-        f"{field.label}: {' | '.join(field.value) if isinstance(field.value, list) else field.value}"
+        f"{field.label}: {_field_text(field.value)}"
         if field.value else field.label
         for field in extracted.fields
     )
@@ -119,6 +149,11 @@ async def _run_pp_structure_path(path: Path, source: str) -> dict[str, Any]:
     response["low_confidence_count"] = extracted.low_confidence_count
     response["schema_source"] = extracted.schema_source
     response["schema_field_count"] = extracted.schema_field_count
+    response["diagnostics"] = [diagnostic.as_dict() for diagnostic in extracted.diagnostics]
+    response["comparison"] = _legacy_comparison(
+        [field.as_dict() for field in legacy.fields],
+        [field.as_dict() for field in extracted.fields],
+    )
     response["extractor_version"] = "v2-pp-structure"
     response["structure"] = extracted.structure.as_dict()
     return response

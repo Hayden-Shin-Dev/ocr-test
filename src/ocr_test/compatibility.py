@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import statistics
+import re
 
 from .field_schema import FieldDefinition, FieldSchema
-from .extractor_v2 import extract_with_structure
+from .extractor_v2 import SemanticMatch, extract_with_structure
 from .models import OCRField, OCRLine, OCRMapping
 
 
@@ -57,9 +58,21 @@ def _compatibility_schema(lines: list[OCRLine]) -> FieldSchema:
 
 
 def map_ocr_lines(lines: list[OCRLine]) -> OCRMapping:
-    result = extract_with_structure(lines, None, schema=_compatibility_schema(lines))
+    result = extract_with_structure(lines, None, schema=_compatibility_schema(lines), matcher=_CompatibilityMatcher())
     return OCRMapping(result.fields, result.layout_mode, result.low_confidence_count)
 
 
 def build_field_mappings(lines: list[OCRLine]) -> list[OCRField]:
     return map_ocr_lines(lines).fields
+
+
+class _CompatibilityMatcher:
+    def match_all(self, text: str, schema: FieldSchema) -> list[SemanticMatch]:
+        normalized = re.sub(r"[^\w]+", "", text.casefold(), flags=re.UNICODE)
+        result = []
+        for definition in schema.fields:
+            aliases = (*definition.labels, definition.name)
+            score = max((1.0 for alias in aliases if re.sub(r"[^\w]+", "", alias.casefold()) == normalized), default=0.0)
+            if score:
+                result.append(SemanticMatch(definition, score))
+        return result
